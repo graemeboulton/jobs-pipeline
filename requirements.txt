@@ -1,0 +1,6 @@
+
+pandas
+psycopg[binary]
+SQLAlchemy
+requests
+azure-functions
