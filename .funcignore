@@ -1,8 +1,11 @@
-.git*
-.vscode
-__azurite_db*__.json
-__blobstorage__
-__queuestorage__
+# ignore local cruft & build outputs
+.venv/
+env/
+bin/
+obj/
+__pycache__/
+*.pyc
+.vscode/
+.git/
+.DS_Store
 local.settings.json
-test
-.venv

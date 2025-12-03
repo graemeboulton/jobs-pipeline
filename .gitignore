@@ -1,90 +1,166 @@
-# -----------------------------
-# Python
-# -----------------------------
+# ============================================================
+# PYTHON-SPECIFIC FILES TO IGNORE
+# ============================================================
+
+# Python automatically generates bytecode cache folders
 __pycache__/
+
+# Compiled Python files (.pyc), optimized (.pyo), debug (.pyd)
 *.py[cod]
+
+# Shared object libraries / compiled native modules
 *.so
+
+# Packaging artefacts when building Python wheels/distributions
 *.egg-info/
 .eggs/
+
+# Build output directories created by python setup tools
 dist/
 build/
+
+# Local virtual environments
+# Never commit virtual environments — they are machine-specific.
 .venv/
 venv/
 .env
+
+# Environment-specific variations (e.g., .env.dev, .env.local)
 .env.*
+
+# SQLite or local DB files — NOT used for Postgres in Azure
 *.sqlite
 *.db
 
-# -----------------------------
-# Jupyter Notebooks
-# -----------------------------
+
+# ============================================================
+# JUPYTER NOTEBOOK ARTIFACTS
+# ============================================================
+
+# Internal checkpoints automatically created by Jupyter
 .ipynb_checkpoints/
 
-# -----------------------------
-# VS Code
-# -----------------------------
+
+# ============================================================
+# VISUAL STUDIO CODE FILES
+# ============================================================
+
+# Local VS Code workspace settings
 .vscode/
+
+# Extension: VS Code local history
 .history/
 
-# -----------------------------
-# macOS system files
-# -----------------------------
-.DS_Store
-.AppleDouble
-.LSOverride
 
-# -----------------------------
-# Windows system files
-# -----------------------------
+# ============================================================
+# macOS SYSTEM FILES
+# These appear when using Finder and should never be committed.
+# ============================================================
+
+# Finder metadata file
+.DS_Store
+
+# Mac helper files for external drives
+.AppleDouble     
+
+# macOS launch services override file
+.LSOverride      
+
+
+# ============================================================
+# WINDOWS SYSTEM FILES
+# These appear when browsing folders in Windows Explorer.
+# ============================================================
+
 Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# -----------------------------
-# Logs and cache
-# -----------------------------
-*.log
-logs/
-.cache/
-coverage/
-htmlcov/
 
-# -----------------------------
-# Azure Functions local files
-# -----------------------------
+# ============================================================
+# LOGS & TEMPORARY CACHE FILES
+# ============================================================
+
+
+# Log files from scripts or tooling
+*.log         
+
+# Log output directories
+logs/ 
+
+# Python and third-party cache dir
+.cache/    
+
+# Coverage.py reports
+coverage/    
+
+# Coverage HTML report output
+htmlcov/      
+
+
+# ============================================================
+# AZURE FUNCTIONS LOCAL DEV FILES
+# ============================================================
+
+# Local-only settings containing secrets (NEVER commit!)
 local.settings.json
+
+# Build artifacts created by Azure Functions Core Tools
 bin/
 obj/
 
-# -----------------------------
-# Terraform / IaC state files
-# -----------------------------
-*.tfstate
-*.tfstate.*
-.terraform/
-crash.log
-override.tf
-override.tf.json
-.terraform.lock.hcl
 
-# -----------------------------
-# Node (only used if you add UI tooling)
-# -----------------------------
+# ============================================================
+# INFRASTRUCTURE-AS-CODE (TERRAFORM) FILES
+# These are machine local and must never be committed.
+# ============================================================
+
+# Terraform state file
+*.tfstate         
+
+# State backup files
+*.tfstate.*       
+
+# Terraform working directory
+.terraform/       
+
+# Crash logs from Terraform
+crash.log  
+
+# Local override files not meant for version control
+override.tf       
+override.tf.json
+
+# Provider lock file (machine specific)
+.terraform.lock.hcl  
+
+
+# ============================================================
+# NODE / FRONT-END TOOLING (if you add UI later)
+# ============================================================
+
+# Gigantic folder of installed node packages
 node_modules/
 
-# -----------------------------
-# Power BI
-# -----------------------------
-# PBIX files are massive; track them in Git LFS instead of Git
-# Uncomment below ONLY if you do not want PBIX in git:
+
+# ============================================================
+# POWER BI
+# ============================================================
+
+# PBIX files contain compressed data models and can be very large.
+# Best practice: Track them via Git LFS, not standard Git.
+# Uncomment ONLY if you want to fully ignore PBIX:
 # *.pbix
 
-# Keep Power BI template files
+# Template files are small and safe to track
 *.pbit
 
-# -----------------------------
-# Archives
-# -----------------------------
+
+# ============================================================
+# ARCHIVE FILES
+# ============================================================
+
+# Ignore common compressed archives
 *.zip
 *.tar
 *.gz

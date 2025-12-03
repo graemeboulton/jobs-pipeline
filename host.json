@@ -1,8 +1,22 @@
 {
   "version": "2.0",
-  "isDefaultHostConfig": true,
+  "logging": {
+    "applicationInsights": {
+      "samplingSettings": { "isEnabled": true }
+    },
+    "logLevel": {
+      "default": "Information",
+      "Function.reed_ingest": "Information"
+    }
+  },
+
+  // Limit what the runtime watches so edits in .venv/bin/etc. don’t constantly recycle the host
+  "watchDirectories": [ "reed_ingest" ],
+  "watchFiles": [ "host.json", "local.settings.json" ],
+
+  // Load extensions via the bundle instead of scanning /bin
   "extensionBundle": {
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
-    "version": "[4.*, 5.0.0)"
+    "version": "[3.*, 4.0.0)"
   }
 }
