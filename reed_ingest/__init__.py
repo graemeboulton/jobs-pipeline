@@ -1302,10 +1302,30 @@ def main(mytimer: func.TimerRequest) -> None:
         t = _title_of(j)
         if not t:
             continue
-        if include_terms and not any(term in t for term in include_terms):
-            continue
-        if exclude_terms and any(term in t for term in exclude_terms):
-            continue
+        # Use word boundary matching for both include and exclude filters
+        # This prevents "bi" from matching "bid", "spiral", etc.
+        if include_terms:
+            include_match = False
+            for term in include_terms:
+                # Match term as whole word or at word boundary
+                pattern = r'\b' + re.escape(term) + r'\b'
+                if re.search(pattern, t):
+                    include_match = True
+                    break
+            if not include_match:
+                continue
+        
+        if exclude_terms:
+            exclude_match = False
+            for term in exclude_terms:
+                # Match term as whole word or at word boundary
+                pattern = r'\b' + re.escape(term) + r'\b'
+                if re.search(pattern, t):
+                    exclude_match = True
+                    break
+            if exclude_match:
+                continue
+        
         filtered_results.append(j)
     print(f"🔎 title-filter: kept={len(filtered_results)} of {pre_filter_count} (include={include_terms} exclude={exclude_terms})")
 
