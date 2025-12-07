@@ -1623,15 +1623,20 @@ def main(mytimer: func.TimerRequest) -> None:
         job_id_str = str(j.get(cfg['JOB_ID_KEY']))
         desc = (j.get('jobDescription') or '').strip()
         # Reed API truncates descriptions at various lengths; detect multiple truncation patterns:
-        # 1. Ends with "..." or "…"
-        # 2. Ends with common truncation phrases like "more", "click here", "apply now"
-        # 3. Very short descriptions (< 200 chars) are likely truncated
+        # 1. Exactly 453 characters (strong indicator from Reed search endpoint truncation)
+        # 2. Ends with "..." or "…"
+        # 3. Ends with common truncation phrases like "more", "click here", "apply now"
+        # 4. Very short descriptions (< 200 chars) are likely truncated
         truncation_patterns = [
             r'\.\.\.$',  # ends with ...
             r'…$',  # ends with …
             r'\b(?:more|click|apply|read|view|visit|download|apply now|learn more)$',  # common truncation phrases
         ]
-        is_truncated = len(desc) < 200 or any(re.search(p, desc.lower()) for p in truncation_patterns)
+        is_truncated = (
+            len(desc) == 453  # Reed search endpoint standard truncation length
+            or len(desc) < 200  # Very short descriptions likely truncated
+            or any(re.search(p, desc.lower()) for p in truncation_patterns)  # Pattern matches
+        )
         
         # Fetch detail endpoint if:
         # 1. Description is truncated, OR
@@ -1640,7 +1645,11 @@ def main(mytimer: func.TimerRequest) -> None:
         
         if needs_detail and cfg.get('API_BASE_URL'):
             try:
+                # Try primary API key first, fall back to backup if 403
                 full = fetch_job_detail(cfg['API_BASE_URL'], job_id_str, cfg['API_KEY'])
+                if not full and cfg.get('API_KEY_BACKUP'):
+                    full = fetch_job_detail(cfg['API_BASE_URL'], job_id_str, cfg['API_KEY_BACKUP'])
+                
                 if full:
                     # Always merge detail-only fields (contractType, fullTime, partTime, salaryType)
                     j['contractType'] = full.get('contractType')
