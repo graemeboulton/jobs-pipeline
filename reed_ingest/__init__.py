@@ -30,6 +30,7 @@ Last Updated: 2025-12-04
 import os
 import sys
 import re
+import time
 from pathlib import Path
 
 # Add current directory to path to import job_classifier
@@ -183,7 +184,7 @@ def load_config() -> Dict[str, Any]:
     cfg["API_BASE_URL"] = _must_get("API_BASE_URL")
     cfg["SEARCH_KEYWORDS"] = os.getenv("SEARCH_KEYWORDS", "data")
     cfg["RESULTS_PER_PAGE"] = int(os.getenv("RESULTS_PER_PAGE", "50"))
-    cfg["MAX_RESULTS"] = int(os.getenv("MAX_RESULTS", "10000"))
+    cfg["MAX_RESULTS"] = int(os.getenv("MAX_RESULTS", "0"))  # 0 = unlimited; >0 = cap at this number
     cfg["SOURCE_NAME"] = os.getenv("SOURCE_NAME", "reed")
     cfg["POSTED_BY_DAYS"] = int(os.getenv("POSTED_BY_DAYS", "1"))  # Incremental: only fetch jobs posted in last N days
 
@@ -414,7 +415,8 @@ def upsert_staging_jobs(conn, skill_patterns: set = None, skill_aliases: dict = 
     
     # Fetch all jobs from landing that have descriptions
     sel_sql = """
-        SELECT job_id, source_name, raw->>'jobTitle' as title, raw->>'jobDescription' as description, raw->>'locationName' as location_name
+        SELECT job_id, source_name, raw->>'jobTitle' as title, raw->>'jobDescription' as description, raw->>'locationName' as location_name,
+               (raw->>'minimumSalary')::numeric as salary_min, (raw->>'maximumSalary')::numeric as salary_max
         FROM landing.raw_jobs
         WHERE raw->>'jobDescription' IS NOT NULL AND raw->>'jobTitle' IS NOT NULL
     """
@@ -425,7 +427,7 @@ def upsert_staging_jobs(conn, skill_patterns: set = None, skill_aliases: dict = 
     # Standardize locations and add to jobs tuple
     all_jobs = []
     location_standardization_map = {}  # Cache for location standardization
-    for job_id, source_name, title, description, raw_location in all_jobs_raw:
+    for job_id, source_name, title, description, raw_location, api_salary_min, api_salary_max in all_jobs_raw:
         # Standardize location if not already cached
         if raw_location:
             if raw_location not in location_standardization_map:
@@ -434,16 +436,16 @@ def upsert_staging_jobs(conn, skill_patterns: set = None, skill_aliases: dict = 
         else:
             standardized_location = None
         
-        all_jobs.append((job_id, source_name, title, description, standardized_location))
+        all_jobs.append((job_id, source_name, title, description, standardized_location, api_salary_min, api_salary_max))
     
     # Store standardized locations for later use
     standardized_location_map = {}  # (source_name, job_id) -> standardized_location
-    for job_id, source_name, title, description, std_location in all_jobs:
+    for job_id, source_name, title, description, std_location, api_salary_min, api_salary_max in all_jobs:
         standardized_location_map[(source_name, job_id)] = std_location
     
     # Filter jobs using same word boundary logic as main function
     jobs = []
-    for job_id, source_name, title, description, std_location in all_jobs:
+    for job_id, source_name, title, description, std_location, api_salary_min, api_salary_max in all_jobs:
         if not title:
             continue
         
@@ -471,7 +473,7 @@ def upsert_staging_jobs(conn, skill_patterns: set = None, skill_aliases: dict = 
             if exclude_match:
                 continue
         
-        jobs.append((job_id, source_name, title, description, std_location))
+        jobs.append((job_id, source_name, title, description, std_location, api_salary_min, api_salary_max))
     
     # Extract skills and detect work location type for each job
     skills_map: Dict[Tuple[str, str], List[str]] = {}
@@ -494,7 +496,7 @@ def upsert_staging_jobs(conn, skill_patterns: set = None, skill_aliases: dict = 
     if job_role_categories is None:
         job_role_categories = JOB_ROLE_CATEGORIES
     
-    for job_id, source_name, title, description, std_location in jobs:
+    for job_id, source_name, title, description, std_location, api_sal_min, api_sal_max in jobs:
         # Extract skills using the updated extract_skills function (min length filter applied there)
         canonical_skills = extract_skills(description, skill_patterns, skill_aliases)
         skills_map[(source_name, job_id)] = canonical_skills
@@ -510,7 +512,10 @@ def upsert_staging_jobs(conn, skill_patterns: set = None, skill_aliases: dict = 
         # Parse salary from description when API fields are missing
         sal_min, sal_max, _ = parse_salary_from_text(description)
         salary_fallback_map[(source_name, job_id)] = (sal_min, sal_max)
-        salary_type_inferred = detect_salary_type(title, description)
+        # Use API salary if available, otherwise parsed salary
+        sal_min_for_type = api_sal_min or sal_min
+        sal_max_for_type = api_sal_max or sal_max
+        salary_type_inferred = detect_salary_type(title, description, sal_min_for_type, sal_max_for_type)
         salary_type_map[(source_name, job_id)] = salary_type_inferred
         # Detect employment terms (full/part time, contract type)
         employment_map[(source_name, job_id)] = detect_employment_terms(title, description)
@@ -637,16 +642,35 @@ def upsert_staging_jobs(conn, skill_patterns: set = None, skill_aliases: dict = 
                     r.raw->>'employerName' as employer_name,
                     (r.raw->>'employerId')::bigint as employer_id,
                     COALESCE(t.standardized_location_name, r.raw->>'locationName') as location_name,
-                    COALESCE((r.raw->>'minimumSalary')::numeric, t.salary_min) as salary_min,
-                    COALESCE((r.raw->>'maximumSalary')::numeric, t.salary_max) as salary_max,
+                    CASE
+                        WHEN t.salary_type = 'per week' THEN COALESCE((r.raw->>'minimumSalary')::numeric, t.salary_min) * 52
+                        WHEN t.salary_type = 'per day' THEN COALESCE((r.raw->>'minimumSalary')::numeric, t.salary_min) * 260
+                        WHEN t.salary_type = 'per hour' THEN COALESCE((r.raw->>'minimumSalary')::numeric, t.salary_min) * 1950
+                        ELSE COALESCE((r.raw->>'minimumSalary')::numeric, t.salary_min)
+                    END as salary_min,
+                    CASE
+                        WHEN t.salary_type = 'per week' THEN COALESCE((r.raw->>'maximumSalary')::numeric, t.salary_max) * 52
+                        WHEN t.salary_type = 'per day' THEN COALESCE((r.raw->>'maximumSalary')::numeric, t.salary_max) * 260
+                        WHEN t.salary_type = 'per hour' THEN COALESCE((r.raw->>'maximumSalary')::numeric, t.salary_max) * 1950
+                        ELSE COALESCE((r.raw->>'maximumSalary')::numeric, t.salary_max)
+                    END as salary_max,
                     r.raw->>'jobUrl' as job_url,
                     (r.raw->>'applications')::int as applications,
                     r.raw->>'jobDescription' as job_description,
                     t.work_location_type,
                     t.seniority_level,
                     t.job_role_category,
-                    COALESCE(t.contract_type, r.raw->>'contractType', 'permanent') as contract_type,
-                    COALESCE(t.full_time, (r.raw->>'fullTime')::boolean, false) as full_time,
+                    COALESCE(t.contract_type, lower(r.raw->>'contractType'), 'permanent') as contract_type,
+                    COALESCE(
+                        t.full_time,
+                        (r.raw->>'fullTime')::boolean,
+                        CASE
+                            WHEN COALESCE(t.part_time, (r.raw->>'partTime')::boolean, false) = false
+                                 AND COALESCE(t.contract_type, lower(r.raw->>'contractType'), 'permanent') = 'permanent'
+                            THEN true
+                            ELSE false
+                        END
+                    ) as full_time,
                     COALESCE(t.part_time, (r.raw->>'partTime')::boolean, false) as part_time,
                     t.salary_type,
                     r.posted_at,
@@ -720,7 +744,8 @@ def fetch_page(
     api_key_backup: Optional[str] = None,
     api_key_backup_2: Optional[str] = None,
     api_key_backup_3: Optional[str] = None,
-    posted_by_days: Optional[int] = None
+    posted_by_days: Optional[int] = None,
+    key_rotation_index: int = 0
 ) -> Dict[str, Any]:
     """
     Fetch single page of results from Reed API search endpoint.
@@ -729,7 +754,8 @@ def fetch_page(
     Optionally filters to jobs posted within N days via postedByDays parameter
     (0 = all jobs, >0 = incremental mode).
 
-    Falls back through 4 API keys on 403 Forbidden errors (rate limiting).
+    Uses round-robin key rotation (all 4 keys) to distribute rate limits evenly.
+    Falls back through keys on 403 Forbidden errors (rate limiting).
     
     Args:
         base_url: Reed API base URL (https://www.reed.co.uk/api/1.0/search)
@@ -741,6 +767,7 @@ def fetch_page(
         api_key_backup_2: Second backup API key (optional)
         api_key_backup_3: Third backup API key (optional)
         posted_by_days: Filter to jobs posted in last N days (optional)
+        key_rotation_index: Current rotation index for round-robin key selection
         
     Returns:
         API response dict with 'results' and 'totalResults' keys
@@ -758,7 +785,7 @@ def fetch_page(
     if posted_by_days and posted_by_days > 0:
         params["postedByDays"] = posted_by_days
     
-    # Try API keys in sequence: primary → backup → backup_2 → backup_3
+    # Build ordered list of keys starting from rotation index (round-robin load balancing)
     api_keys = [api_key]
     if api_key_backup:
         api_keys.append(api_key_backup)
@@ -767,26 +794,45 @@ def fetch_page(
     if api_key_backup_3:
         api_keys.append(api_key_backup_3)
     
-    for i, key in enumerate(api_keys):
-        try:
-            resp = requests.get(base_url, params=params, auth=(key, ""))
-            resp.raise_for_status()
-            return resp.json()
-        except requests.HTTPError as e:
-            if e.response.status_code == 403 and i < len(api_keys) - 1:
-                print(f"⚠️ API key {i+1} rate limited (403); trying backup key {i+2}...")
-                continue
-            elif i < len(api_keys) - 1:
-                print(f"⚠️ API key {i+1} failed ({e}); trying backup key {i+2}...")
-                continue
-            else:
-                raise
-        except Exception as e:
-            if i < len(api_keys) - 1:
-                print(f"⚠️ API key {i+1} error ({e}); trying backup key {i+2}...")
-                continue
-            else:
-                raise
+    # Rotate key order: start from rotation_index to distribute load evenly
+    rotated_keys = api_keys[key_rotation_index % len(api_keys):] + api_keys[:key_rotation_index % len(api_keys)]
+    
+    max_retries = 3
+    retry_delay = 0.5
+    
+    for i, key in enumerate(rotated_keys):
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = requests.get(base_url, params=params, auth=(key, ""))
+                resp.raise_for_status()
+                return resp.json()
+            except requests.HTTPError as e:
+                # 500/502/503 errors: retry with exponential backoff
+                if e.response.status_code in [500, 502, 503]:
+                    if attempt < max_retries:
+                        backoff = retry_delay * (2 ** (attempt - 1))
+                        print(f"⚠️ API key #{(key_rotation_index + i) % len(api_keys) + 1} returned {e.response.status_code} (attempt {attempt}/{max_retries}); retrying in {backoff:.1f}s...")
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        print(f"⚠️ API key #{(key_rotation_index + i) % len(api_keys) + 1} returned {e.response.status_code} after {max_retries} attempts; trying next key...")
+                        break  # Move to next key
+                # 403 rate limit: move to next key immediately
+                elif e.response.status_code == 403 and i < len(rotated_keys) - 1:
+                    print(f"⚠️ API key #{(key_rotation_index + i) % len(api_keys) + 1} rate limited (403); trying next key...")
+                    break  # Move to next key
+                # Other errors: try next key
+                elif i < len(rotated_keys) - 1:
+                    print(f"⚠️ API key #{(key_rotation_index + i) % len(api_keys) + 1} failed ({e}); trying next key...")
+                    break  # Move to next key
+                else:
+                    raise
+            except Exception as e:
+                if i < len(rotated_keys) - 1:
+                    print(f"⚠️ API key #{(key_rotation_index + i) % len(api_keys) + 1} error ({e}); trying next key...")
+                    break  # Move to next key
+                else:
+                    raise
     
     # Should never reach here
     raise RuntimeError("No API keys available")
@@ -798,7 +844,9 @@ def fetch_job_detail(
     api_key: str,
     api_key_backup_1: Optional[str] = None,
     api_key_backup_2: Optional[str] = None,
-    api_key_backup_3: Optional[str] = None
+    api_key_backup_3: Optional[str] = None,
+    key_rotation_index: int = 0,
+    backoff_seconds: float = 0.5
 ) -> Optional[Dict[str, Any]]:
     """
     Fetch full job details for a given job_id using Reed API.
@@ -822,7 +870,7 @@ def fetch_job_detail(
         jobs_url = jobs_url[:-len('/search')]
     jobs_url = f"{jobs_url}/jobs/{job_id}"
     
-    # Try API keys in sequence: primary → backup_1 → backup_2 → backup_3
+    # Try API keys in sequence with round-robin rotation: primary → backup_1 → backup_2 → backup_3
     api_keys = [api_key]
     if api_key_backup_1:
         api_keys.append(api_key_backup_1)
@@ -830,25 +878,30 @@ def fetch_job_detail(
         api_keys.append(api_key_backup_2)
     if api_key_backup_3:
         api_keys.append(api_key_backup_3)
-    
-    for i, key in enumerate(api_keys):
+
+    rotated_keys = api_keys[key_rotation_index % len(api_keys):] + api_keys[:key_rotation_index % len(api_keys)]
+
+    for i, key in enumerate(rotated_keys):
         try:
             r = requests.get(jobs_url, auth=(key, ""))
             r.raise_for_status()
             return r.json()
         except requests.HTTPError as e:
-            if e.response.status_code == 403 and i < len(api_keys) - 1:
-                print(f"⚠️ API key {i+1} rate limited (403); trying backup key {i+2}...")
+            if e.response.status_code == 403 and i < len(rotated_keys) - 1:
+                print(f"⚠️ API key #{(key_rotation_index + i)%len(api_keys)+1} rate limited (403); trying next key...")
+                time.sleep(backoff_seconds)
                 continue
-            elif i < len(api_keys) - 1:
-                print(f"⚠️ API key {i+1} failed ({e}); trying backup key {i+2}...")
+            elif i < len(rotated_keys) - 1:
+                print(f"⚠️ API key #{(key_rotation_index + i)%len(api_keys)+1} failed ({e}); trying next key...")
+                time.sleep(backoff_seconds)
                 continue
             else:
                 print(f"⚠️ Failed to fetch job detail for {job_id} (all API keys exhausted): {e}")
                 return None
         except Exception as e:
-            if i < len(api_keys) - 1:
-                print(f"⚠️ API key {i+1} error ({e}); trying backup key {i+2}...")
+            if i < len(rotated_keys) - 1:
+                print(f"⚠️ API key #{(key_rotation_index + i)%len(api_keys)+1} error ({e}); trying next key...")
+                time.sleep(backoff_seconds)
                 continue
             else:
                 print(f"⚠️ Failed to fetch job detail for {job_id}: {e}")
@@ -932,12 +985,31 @@ def parse_salary_from_text(description: str) -> Tuple[Optional[float], Optional[
         if min_val is not None:
             return min_val, min_val, currency
 
+    # Try to extract salary from job title (e.g., "Lead Engineer - £75,000")
+    title_pattern = re.search(r"[-/]\s*£\s?(\d{1,3}(?:[, ]\d{3})*|\d+)(k)?", description[:200], re.IGNORECASE)
+    if title_pattern:
+        val = _to_number(title_pattern.group(1), bool(title_pattern.group(2)))
+        if val is not None and (val >= 10000 or (val >= 10 and title_pattern.group(2))):
+            return val, val, currency
+
     # Fallback: grab salary-like numbers (filter out small values like "2-3 days")
-    # Only consider numbers that look like salaries (>= 10k or >= 10000)
+    # Exclude common non-salary contexts: "X days", "X months", "X years"
+    exclude_pattern = re.compile(r"\d+\s*(?:day|days|month|months|year|years|week|weeks|x|times|%|percent)", re.IGNORECASE)
+    
     number_pattern = re.compile(r"£\s?(\d{1,3}(?:[, ]\d{3})+|\d+)(k)?")
     numbers = []
-    for n, kflag in number_pattern.findall(description):
+    for match in number_pattern.finditer(description):
+        n, kflag = match.groups()
         val = _to_number(n, bool(kflag))
+        
+        # Check if this number appears in a non-salary context
+        start, end = match.span()
+        context = description[max(0, start-20):min(len(description), end+30)]
+        
+        # Skip if this number is part of "X days/months/years" etc
+        if exclude_pattern.search(context):
+            continue
+            
         if val is not None and (val >= 10000 or (val >= 10 and kflag)):
             numbers.append(val)
 
@@ -950,31 +1022,115 @@ def parse_salary_from_text(description: str) -> Tuple[Optional[float], Optional[
     return lo, hi, currency
 
 
-def detect_salary_type(title: str, description: str) -> Optional[str]:
-    """Infer salary type from title/description text.
+def detect_salary_type(title: str, description: str, salary_min: Optional[float] = None, salary_max: Optional[float] = None) -> Optional[str]:
+    """Infer salary type from title/description text with improved prioritization.
 
     Returns one of: 'per annum', 'per month', 'per week', 'per day', 'per hour', or None.
+    
+    Detection strategy:
+    1. Look for rate indicators near salary amounts (most reliable)
+    2. Only if no rate found near amount, check for explicit per annum indicators
+    3. Use salary range heuristics as final fallback
+    
+    Args:
+        title: Job title
+        description: Job description
+        salary_min: Optional minimum salary (for better heuristic)
+        salary_max: Optional maximum salary (for better heuristic)
     """
+    if not (title or description):
+        return None
+
+    # If both salary bounds are explicitly zero, treat as unknown and avoid assigning a type
+    if salary_min == 0 and salary_max == 0:
+        return None
+    
     text = f"{title or ''} {description or ''}".lower()
-
-    pa_tokens = [
-        'per annum', 'p.a', 'p.a.', 'pa ', ' pa', 'pa/', 'p/a', 'annual', 'annum', 'a year', 'per year', 'yearly'
+    
+    # FIRST: Check for rate indicators near salary amounts
+    # These patterns look for rate words near actual numbers (including comma-separated)
+    patterns = [
+        # Per hour - specific patterns only
+        (r'\b(?:£|p)?\d+(?:,\d{3})*\.?\d*\s*(?:per\s*hour|ph\b|p/h|/hour|hourly|\bhour\s*rate)', 'per hour'),
+        (r'\b(?:per\s*hour|ph\b|p/h|/hour|hourly|\bhour\s*rate)\s*(?:£|p)?\d+(?:,\d{3})*', 'per hour'),
+        # Per day - specific patterns only
+        (r'\b(?:£|p)?\d+(?:,\d{3})*\.?\d*\s*(?:per\s*day|pd\b|p/d|/day|day\s*rate|daily)', 'per day'),
+        (r'\b(?:per\s*day|pd\b|p/d|/day|day\s*rate|daily)\s*(?:£|p)?\d+(?:,\d{3})*', 'per day'),
+        # Per week - specific patterns only
+        (r'\b(?:£|p)?\d+(?:,\d{3})*\.?\d*\s*(?:per\s*week|pw\b|p/w|/week)', 'per week'),
+        (r'\b(?:per\s*week|pw\b|p/w|/week)\s*(?:£|p)?\d+(?:,\d{3})*', 'per week'),
+        # Per month - specific patterns only
+        (r'\b(?:£|p)?\d+(?:,\d{3})*\.?\d*\s*(?:per\s*month|pcm|p\.c\.m|/month|monthly)', 'per month'),
+        (r'\b(?:per\s*month|pcm|p\.c\.m|/month|monthly)\s*(?:£|p)?\d+(?:,\d{3})*', 'per month'),
     ]
-    month_tokens = ['per month', 'pcm', 'p.c.m', '/month']
-    week_tokens = ['per week', 'pw ', ' pw', 'p/w', '/week', 'weekly']
-    day_tokens = ['per day', 'pd ', ' pd', 'p/d', '/day', 'day rate', 'daily']
-    hour_tokens = ['per hour', 'ph ', ' ph', 'p/h', '/hour', 'hourly']
-
-    if any(tok in text for tok in pa_tokens):
+    
+    for pattern, sal_type in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            # Extract the number to sanity-check against type
+            # Look for £XXX,XXX or £XXX format numbers in the match
+            numbers_in_match = re.findall(r'£?\s?(\d+(?:,\d{3})*(?:\.\d+)?)', match.group())
+            if numbers_in_match:
+                try:
+                    val = float(numbers_in_match[0].replace(',', ''))
+                    # Sanity checks: avoid unrealistic combinations
+                    if sal_type in ('per hour', 'per day') and val >= 5000:
+                        # £5000+ per hour/day is extremely unrealistic, likely annual
+                        continue
+                    return sal_type
+                except (ValueError, IndexError):
+                    return sal_type
+            else:
+                return sal_type
+    
+    # SECOND: Check for explicit per annum indicators (only if no rate found near amount)
+    pa_indicators = [
+        r'\bper annum\b',
+        r'\bp\.a\.?\b',
+        r'\bper year\b',
+        r'\bper annual\b',
+        r'annually'
+    ]
+    
+    if any(re.search(pat, text, re.IGNORECASE) for pat in pa_indicators):
         return 'per annum'
-    if any(tok in text for tok in month_tokens):
-        return 'per month'
-    if any(tok in text for tok in week_tokens):
-        return 'per week'
-    if any(tok in text for tok in day_tokens):
-        return 'per day'
-    if any(tok in text for tok in hour_tokens):
-        return 'per hour'
+    
+    # THIRD: Use actual parsed salary values for heuristic (most reliable fallback)
+    # If we have the parsed salary amounts, use them
+    if salary_min is not None and salary_min > 0:
+        # Single value or range - if >= 5001, it's almost certainly annual
+        # unless explicitly marked otherwise above
+        if salary_min >= 5001 or (salary_max and salary_max >= 5001):
+            return 'per annum'
+        
+        # For lower values, use salary range heuristics
+        if salary_min <= 50:
+            return 'per hour'
+        elif salary_min <= 200:
+            return 'per day'
+        elif salary_min <= 5000:
+            # Ambiguous - could be daily or monthly, default to daily
+            return 'per day'
+    
+    # FOURTH: Fallback to text-based extraction (least reliable)
+    if re.search(r'\b(?:£|p)?\d+', text):
+        numbers = re.findall(r'(?:£|p)?(\d+(?:,\d{3})*(?:\.\d+)?)', text)
+        if numbers:
+            try:
+                first_num = float(numbers[0].replace(',', ''))
+                
+                # Heuristic ranges based on typical UK salary patterns
+                if first_num <= 50:  # £12-50 almost always hourly
+                    return 'per hour'
+                elif 51 <= first_num <= 200:  # £51-200 usually daily
+                    return 'per day'
+                elif 201 <= first_num <= 5000:  # £201-5000 usually daily
+                    return 'per day'
+                elif first_num >= 5001:  # £5000+ almost always annual
+                    return 'per annum'
+            except (ValueError, IndexError):
+                pass
+    
     return None
 
 
@@ -1107,7 +1263,6 @@ def detect_employment_terms(title: str, description: str) -> Tuple[Optional[bool
         full_time = True
 
     return full_time, part_time, contract_type
-
 
 def extract_skills(description: str, skill_patterns: set = None, skill_aliases: dict = None) -> List[str]:
     """
@@ -1351,14 +1506,15 @@ def detect_work_location_type(title: str, description: str) -> str:
     """
     text = f"{title or ''} {description or ''}".lower()
     
-    # Remote indicators (strong signals)
+    # Remote indicators (strong signals) - require context to avoid "remote access tools" false positives
     remote_patterns = [
-        r'\b(?:fully |100% |completely )?remote\b',
+        r'\b(?:fully |100% |completely )?remote\s+(?:role|position|job|location|working|working)\b',
         r'\bwork from home\b',
         r'\bwfh\b',
         r'\b(?:fully |100% )?home.?based\b',
-        r'\bremote.?(?:first|only|working)\b',
+        r'\bremote.?(?:first|only)\b',
         r'\banywhere in (?:the )?uk\b',
+        r'\b100% remote\b',
     ]
     
     # Hybrid indicators
@@ -1366,9 +1522,10 @@ def detect_work_location_type(title: str, description: str) -> str:
         r'\bhybrid\b',
         r'\b\d+\s*days?\s+(?:in|at|in the|per)\s+(?:the )?office\b',
         r'\b\d+\s*days?\s+(?:remote|home|wfh)\b',
-        r'\bflexible working\b',
+        r'\bflexible\s+(?:working|work)\b',
         r'\bpart.?remote\b',
         r'\bcombination of (?:remote|home) and office\b',
+        r'\b(?:remotely or on.?site|on.?site or remotely)\b',
         r'\boffice and remote\b',
         r'\bremote and office\b',
     ]
@@ -1380,6 +1537,7 @@ def detect_work_location_type(title: str, description: str) -> str:
         r'\bin.?office\b',
         r'\boffice.?based\b',
         r'\bat our office\b',
+        r'\bbased\s+(?:in|at)\s+(?:[a-z\s]+?)\b',  # "based in London", "based at Manchester"
     ]
     
     # Check in priority order: remote > hybrid > office
@@ -1397,6 +1555,13 @@ def detect_work_location_type(title: str, description: str) -> str:
     
     for pattern in office_patterns:
         if re.search(pattern, text):
+            # Double-check it's not hybrid or remote
+            for hybrid_pattern in hybrid_patterns:
+                if re.search(hybrid_pattern, text):
+                    return 'hybrid'
+            for remote_pattern in remote_patterns:
+                if re.search(remote_pattern, text):
+                    return 'remote'
             return 'office'
     
     return 'unknown'
@@ -2041,6 +2206,8 @@ def main(mytimer: func.TimerRequest) -> None:
         total_results = int(total_results)
     print(f"📊 Page 1: {len(results)} results, total pages estimate: {total_results}")
 
+    search_key_rotation = 0  # Track key rotation for pagination
+
     if total_results is None:
         # Fallback: keep fetching until an empty page
         # but still report how many we saw
@@ -2059,11 +2226,17 @@ def main(mytimer: func.TimerRequest) -> None:
     print(f"📄 Will fetch approximately {pages} pages")
 
     if pages > 1:
+        skipped_pages = []
         for p in range(2, pages + 1):
-            # Check MAX_RESULTS limit
-            if len(results) >= cfg.get("MAX_RESULTS", float('inf')):
-                print(f"⚠️ Reached MAX_RESULTS limit ({cfg.get('MAX_RESULTS')}); stopping pagination.")
+            # Check MAX_RESULTS limit (0 = unlimited; >0 = cap)
+            max_results = cfg.get("MAX_RESULTS", 0)
+            if max_results > 0 and len(results) >= max_results:
+                print(f"⚠️ Reached MAX_RESULTS limit ({max_results}); stopping pagination.")
                 break
+            
+            # Round-robin key rotation: use (page-1) % 4 to distribute load
+            key_rotation = (p - 1) % 4
+            
             try:
                 page_obj = fetch_page(
                     cfg["API_BASE_URL"],
@@ -2075,19 +2248,24 @@ def main(mytimer: func.TimerRequest) -> None:
                     api_key_backup_2=cfg.get("API_KEY_BACKUP2"),
                     api_key_backup_3=cfg.get("API_KEY_BACKUP3"),
                     posted_by_days=cfg["POSTED_BY_DAYS"],
+                    key_rotation_index=key_rotation,
                 )
+                page_items = page_obj.get(results_key, []) or []
+                if not page_items:
+                    print(f"🔚 Empty page at p={p}; stopping pagination.")
+                    break
+
+                results.extend(page_items)
+                progress_pct = (len(results) / total_results * 100) if isinstance(total_results, int) else 0
+                print(f"  Page {p} (Key #{key_rotation + 1}): +{len(page_items)} items (total: {len(results)}, ~{progress_pct:.0f}%)")
             except Exception as e:
-                print(f"❌ API call (page {p}) failed: {e}")
-                break
-
-            page_items = page_obj.get(results_key, []) or []
-            if not page_items:
-                print(f"🔚 Empty page at p={p}; stopping pagination.")
-                break
-
-            results.extend(page_items)
-            progress_pct = (len(results) / total_results * 100) if isinstance(total_results, int) else 0
-            print(f"  Page {p}: +{len(page_items)} items (total: {len(results)}, ~{progress_pct:.0f}%)")
+                # Log failed page but continue pagination instead of breaking
+                print(f"⚠️ API call (page {p}) failed: {e}; skipping and continuing to next page")
+                skipped_pages.append(p)
+                continue
+        
+        if skipped_pages:
+            print(f"ℹ️ Skipped {len(skipped_pages)} pages due to API errors: {skipped_pages}")
 
     # Apply title-based filtering using ML classifier + rule-based fallback
     print(f"⏳ [4/8] Applying title filters...")
@@ -2191,6 +2369,7 @@ def main(mytimer: func.TimerRequest) -> None:
     enriched_count = 0
     not_enriched_count = 0
     skipped_count = 0
+    detail_key_rotation = 0
     for i, j in enumerate(filtered_results, 1):
         job_id_str = str(j.get(cfg['JOB_ID_KEY']))
         desc = (j.get('jobDescription') or '').strip()
@@ -2210,16 +2389,19 @@ def main(mytimer: func.TimerRequest) -> None:
             or any(re.search(p, desc.lower()) for p in truncation_patterns)  # Pattern matches
         )
         
-        # Fetch detail endpoint if:
-        # 1. Description is truncated, OR
-        # 2. We're missing detail-only fields (contractType, fullTime, partTime, salaryType)
-        needs_detail = is_truncated or not j.get('contractType')
+        # Fetch detail endpoint ONLY if description is truly truncated (>500 chars = good enough)
+        # Skip enrichment for already-full descriptions to preserve API quota
+        needs_detail = is_truncated and len(desc) < 500  # Only fetch if actually truncated
         
         # Skip enrichment if explicitly disabled or if API appears rate-limited
         skip_enrichment = cfg.get('SKIP_ENRICHMENT', False)
         
         if needs_detail and cfg.get('API_BASE_URL') and not skip_enrichment:
             try:
+                # Add throttling between detail calls to reduce rate limit pressure
+                if i > 1:
+                    time.sleep(1.0)
+                
                 # Fetch with 4-tier API key fallback chain
                 full = fetch_job_detail(
                     cfg['API_BASE_URL'],
@@ -2227,8 +2409,11 @@ def main(mytimer: func.TimerRequest) -> None:
                     cfg['API_KEY'],
                     api_key_backup_1=cfg.get('API_KEY_BACKUP'),
                     api_key_backup_2=cfg.get('API_KEY_BACKUP2'),
-                    api_key_backup_3=cfg.get('API_KEY_BACKUP3')
+                    api_key_backup_3=cfg.get('API_KEY_BACKUP3'),
+                    key_rotation_index=detail_key_rotation,
+                    backoff_seconds=2.0
                 )
+                detail_key_rotation += 1
                 
                 if full:
                     # Always merge detail-only fields (contractType, fullTime, partTime, salaryType)
