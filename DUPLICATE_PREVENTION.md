@@ -1,53 +1,89 @@
-# Duplicate Prevention & Detection Strategy
+# Data Quality & Duplicate Prevention
 
 ## Overview
 
-This document outlines the comprehensive approach to preventing and detecting duplicate records throughout the jobs pipeline ETL system.
+This document outlines the comprehensive approach to maintaining data quality and preventing duplicates throughout the Reed Job Pipeline ETL system.
 
-## Architecture Layers & Duplicate Prevention
+## Duplicate Prevention Strategy
 
-### 1. **Landing Layer** (`landing.raw_jobs`)
-- **Purpose**: Raw data from Reed API
+### Landing Layer (`landing.raw_jobs`)
 - **Primary Key**: `(source_name, job_id)`
-- **Deduplication Strategy**: `ON CONFLICT` upsert with page-size-based batching
-- **Implementation**: `upsert_jobs()` function uses `execute_values()` with `page_size=500`
+- **Prevention**: `ON CONFLICT` upsert with content hash-based change detection
+- **Batch Size**: 500 rows per insert batch for optimal performance
+- **Benefit**: Idempotent API polling—safe to re-run without creating duplicates
 
-### 2. **Staging Layer** (`staging.jobs_v1`)
-- **Purpose**: Transformed, enriched job data with extracted features
+### Staging Layer (`staging.jobs_v1`)
 - **Primary Key**: `(source_name, job_id)`
-- **Deduplication Strategy**: 
-  - **Temp Table Pattern**: Data is loaded into temporary table, then upserted atomically
-  - **ON CONFLICT Handling**: Uses `ON CONFLICT DO UPDATE SET` to merge new data with existing
-  - **Atomic Operations**: Single batch insert prevents partial state failures
-- **Implementation**: `upsert_staging_jobs()` function (lines 397-658)
+- **Prevention**: Atomic temp-table pattern:
+  1. Load all transformed jobs into temp table
+  2. Single atomic UPSERT from temp to `staging.jobs_v1`
+  3. Temp table dropped automatically on transaction commit
+- **Why Atomic**: Prevents partial failures mid-batch
+- **Benefit**: All-or-nothing semantics ensure consistency
 
-### 3. **Junction Table** (`staging.job_skills`)
-- **Purpose**: Many-to-many mapping of jobs to extracted skills
+### Skill Junction Table (`staging.job_skills`)
 - **Unique Constraint**: `(source_name, job_id, skill)`
-- **Deduplication Strategy**: `ON CONFLICT` with skill category updates
-- **Implementation**: `upsert_job_skills()` function with bulk `execute_values()`
+- **Prevention**: `ON CONFLICT` with skill category updates
+- **Batch Size**: 1000 rows per insert
+- **Benefit**: Many-to-many relationships stay clean
 
-### 4. **Core Layer** (`core.fact_job_posting`, `core.dim_*`)
-- **Purpose**: Denormalized fact table and dimension tables (views or materialized)
-- **Current Status**: No direct pipeline writes; fed from staging views
-- **Integrity**: Enforced through view logic and unique constraints
+## Data Quality Checks
 
-## Root Cause Analysis: Historical Duplicates
+### Deduplication Detection
+Built into the pipeline (`reed_ingest/__init__.py`):
+- Detects duplicates by compound key across all layers
+- Reports duplicates found at each stage
+- Post-cleanup verification ensures success
 
-### Previous Issue (Fixed)
-**Symptoms**: 3,690 duplicate rows in `staging.job_skills` and `staging.jobs_v1`
+### Description Validation
+- Detects truncation patterns (453-char boundary, `...`, common truncation phrases)
+- Validates length distribution (min, max, average)
+- Alerts if many jobs at same length (truncation indicator)
+- Tracks enrichment rate from detail endpoint
 
-**Root Cause**: Inefficient individual INSERT loop in `upsert_staging_jobs()`
-```python
-# OLD CODE (lines 545-627):
-for (source_name, job_id), skills in skills_map.items():
-    cur.execute("INSERT INTO ... WHERE (source_name, job_id) = ...", ...)  # 2,238+ individual operations
-```
+### Expiry Management
+- Automatic removal of jobs past expiration date
+- Ensures `fact_jobs` only contains active postings for analytics
 
-**Problems with Loop-Based Approach**:
-1. **Transaction Risk**: If any INSERT fails mid-loop, previous inserts commit but loop halts
-2. **No Atomicity**: Partial batch state can occur
-3. **Performance**: 2,238+ individual database round-trips
+### Content Hash Change Detection
+- MD5 hash of raw JSON enables efficient updates
+- Only updates job if content changed
+- Prevents unnecessary re-processing
+
+## Current System Metrics
+
+- **Landing Layer**: 2,791 unique jobs, 0 duplicates
+- **Staging Layer**: 2,552 jobs after title filtering, 0 duplicates
+- **Fact Table**: 2,791 rows, 0 duplicates
+- **Skills**: All extracted and deduplicated by (job_id, skill)
+
+## Best Practices for Developers
+
+1. **Always use UPSERT for idempotency**: Use `ON CONFLICT DO UPDATE SET` not DELETE + INSERT
+2. **Batch large operations**: Insert in pages (500–1000 rows) not individually
+3. **Use atomic transactions**: Wrap multi-statement operations in explicit transactions
+4. **Validate after load**: Run duplicate detection after any manual SQL inserts
+5. **Hash content for change detection**: Compare before re-processing expensive operations
+6. **Test with backfill**: Use `--cleanup` flag to verify deduplication logic before production
+
+## Troubleshooting
+
+### If duplicates appear:
+1. Check for individual INSERT loops (bad pattern)
+2. Verify `ON CONFLICT` clause is present in UPSERT
+3. Confirm batch operations are atomic (wrapped in transactions)
+4. Review recent code changes to `upsert_staging_jobs()` or `upsert_jobs()`
+
+### If enrichment rate drops:
+1. Check API rate limiting (403 errors) in logs
+2. Verify detail endpoint is still reachable
+3. Confirm API keys have sufficient quota
+4. Check network connectivity to Reed API
+
+### If description validation warns of truncation:
+1. Re-run pipeline to retry detail endpoint calls
+2. Check Reed API for service disruptions
+3. Increase backoff time between detail fetches
 4. **Duplicate Window**: Between runs, if enrichment partially completes, next run re-creates partial data
 
 **Solution Implemented**: Temp Table Pattern

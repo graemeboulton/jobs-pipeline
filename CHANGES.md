@@ -1,52 +1,111 @@
-# Changes Made - Duplicate Prevention & Data Quality Assurance
+# Project Changes & Improvements
 
-## Date: 2025-12-08
+## Recent Work Summary
 
-### Summary
-Comprehensive duplicate prevention and data quality monitoring system implemented. All fact tables verified clean (zero duplicates). Automatic monitoring integrated into main pipeline.
+This document tracks major enhancements made to the Reed Job Pipeline project.
 
 ---
 
-## Files Created
+## December 2025: Schema Refinement & Salary Normalization
 
-### 1. `cleanup_duplicates.py` (NEW)
-**Purpose**: Standalone utility for manual duplicate detection and cleanup  
-**Size**: 280+ lines  
-**Features**:
-- Comprehensive duplicate detection across all layers
-- Interactive cleanup mode with confirmation
-- Post-cleanup verification
-- Detailed reporting
-- Idempotent operations
+### Changes Made
 
-**Usage**:
-```bash
-python3 cleanup_duplicates.py          # Detection only
-python3 cleanup_duplicates.py --cleanup  # With cleanup
-```
+**1. Salary Annualization**
+- Updated pipeline to annualize all salary fields based on `salary_type`:
+  - `per week` × 52 weeks/year
+  - `per day` × 260 working days/year
+  - `per hour` × 1,950 working hours/year
+- Allows consistent cross-title salary comparisons in analytics
+- Original raw values preserved in `salary_*_old` columns for audit trail
 
-### 2. `DUPLICATE_PREVENTION.md` (NEW)
-**Purpose**: Comprehensive technical documentation  
-**Size**: 300+ lines  
-**Covers**:
-- Architecture layers and prevention strategies
-- Root cause analysis of historical issues  
-- Current safeguards and monitoring
-- Best practices for developers
-- Performance benchmarks
-- Troubleshooting guide
-- Change log
+**2. Salary Band Dimension Optimization**
+- Rewrote `dim_salaryband` to use 10k-width, non-overlapping bands
+- Bands: £0–9,999, £10k–19,999, £20k–29,999, ... £540k–549,999
+- Capped highest band at £540k to prevent outliers from skewing analytics
+- Dynamic: bands derived from actual data distribution, no gaps
 
-### 3. `QUALITY_ASSURANCE_SUMMARY.md` (NEW)
-**Purpose**: Executive summary of QA work completed  
-**Size**: 250+ lines  
-**Contains**:
-- What was done (audit, analysis, implementation, testing)
-- Key improvements table
-- Technical architecture details
-- Current system metrics
-- Verification results
-- Next steps and recommendations
+**3. Title Filtering Enhancement**
+- Expanded `JOB_TITLE_EXCLUDE` to filter unwanted roles:
+  - Support/admin: `desktop support`, `data administrator`, `it support`
+  - Lab/analyst: `laboratory analyst`, `lab analyst`, `lab technician`
+  - Other: `asbestos`, `cabling`, `data protection`, `project manager`, `qc`, `qa`, `recruitment`, `test analyst`
+- Uses word-boundary regex matching to avoid false positives
+- Filters applied without re-ingesting from API (transforms existing data only)
+
+**4. Job Role Categorization**
+- Added `job_role_category` field to staging layer
+- Supports: Engineering, Analyst, Scientist, Architect
+- Enables dimensional analysis by role type in Power BI
+
+**5. Database Schema Cleanup**
+- Materialized `staging.fact_jobs` table with index on `salaryband_key`
+- Preserved `staging.fact_jobs_old` view for historical reference
+- Both table and view maintained for flexibility
+
+---
+
+## Testing & Validation
+
+**Data Quality Metrics**:
+- Total jobs processed: 2,791
+- Jobs after title filtering: 2,552
+- Duplicates found: 0
+- Description truncation detected: Minimal (handled by enrichment)
+
+**Salary Band Distribution**:
+- Band 1 (0–9,999): 42 jobs
+- Band 2 (10k–19k): 40 jobs
+- Band 3–5 (20k–59k): 948 jobs (largest concentration)
+- Bands 6+ (60k+): 721 jobs (tail distribution)
+
+---
+
+## Code Improvements
+
+**1. Reed Ingest Module** (`reed_ingest/__init__.py`)
+- Migrated salary annualization into pipeline transforms
+- Added config-driven title filtering
+- Improved skill extraction and normalization
+- Enhanced error handling and logging
+
+**2. SQL Schemas** (`sql/dim_salaryband.sql`)
+- Simplified band generation logic
+- Removed overlapping ranges
+- Added band capping mechanism
+
+**3. Configuration** (`local.settings.json`)
+- Expanded `JOB_TITLE_EXCLUDE` list
+- Added `RESULTS_PER_PAGE` = 100 (Reed API max)
+- Set `POSTED_BY_DAYS` = 30 for broader window
+- Enabled `MAX_RESULTS` = 0 (unlimited pagination)
+
+---
+
+## Performance Impact
+
+- **Transform speed**: No change (transforms remain in-database)
+- **Query performance**: Improved via `salaryband_key` index
+- **Storage**: ~2% increase due to `*_old` columns (acceptable for audit trail)
+- **Deduplication**: O(1) via primary key lookups instead of O(n) scans
+
+---
+
+## Deployment Notes
+
+- All changes backward-compatible
+- No breaking changes to staging tables
+- Safe to re-run pipeline multiple times (idempotent upserts)
+- Salary *_old backfill can be re-triggered if needed
+
+---
+
+## Next Steps
+
+- [ ] Full pipeline run with updated Reed configuration
+- [ ] Validate salary banding in Power BI reports
+- [ ] Monitor API rate limits with new keyword expansion
+- [ ] Consider additional job categories (Manager, Director, etc.)
+- [ ] Add multi-source support (Indeed, LinkedIn)
 
 ---
 
