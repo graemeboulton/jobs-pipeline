@@ -62,31 +62,28 @@ except ImportError:
 # Grouped skills to enable category tagging (e.g., programming_languages, databases)
 SKILL_GROUPS: Dict[str, set] = {
     "programming_languages": {
-        'python', 'java', 'javascript', 'typescript', 'c++', 'ruby', 'php', 'rust', 'swift', 'kotlin', 'scala'
+        'python', 'java', 'r', 'scala', 'SQL'
         # Removed: 'c#', 'go', 'r' (too short / high false-positive rate)
     },
     "databases": {
-        'sql', 'mysql', 'postgresql', 'postgres', 'mongodb', 'redis', 'elasticsearch', 'oracle', 'sql server', 'dynamodb',
-        'nosql', 'cassandra', 'neo4j', 'snowflake', 'bigquery'
+        'sql', 'mysql', 'postgresql', 'postgres', 'mongodb', 'oracle', 'sql server', 'dynamodb',
+        'Parquet', 'snowflake', 'bigquery'
     },
     "cloud_devops": {
-        'aws', 'azure', 'gcp', 'google cloud', 'docker', 'kubernetes', 'terraform', 'ansible', 'jenkins', 'gitlab',
-        'github actions', 'ci/cd', 'circleci', 'travis ci', 'helm', 'argocd'
+        'aws', 'azure', 'gcp', 'google cloud', 'Data Factory', 'Synapse', 'terraform', 'ansible', 'jenkins', 'gitlab',
+        'S3', 'Glue', 'Lambda', 'Redshift', 'Athena', 'Fabric'
         # Removed: 'k8s' (< 3 chars)
     },
     "data_ml": {
-        'machine learning', 'deep learning', 'nlp', 'tensorflow', 'pytorch', 'scikit-learn',
+        'apache spark', 'dbt', 'tensorflow', 'pytorch', 'scikit-learn',
         'pandas', 'numpy', 'matplotlib', 'jupyter', 'spark', 'hadoop', 'kafka', 'airflow', 'databricks', 'mlflow'
         # Removed: 'ai' (too short / high false-positive rate)
     },
     "bi_analytics": {
         'tableau', 'power bi', 'looker', 'qlik', 'excel'
     },
-    "methodologies": {
-        'agile', 'scrum', 'kanban', 'devops', 'tdd', 'bdd', 'microservices', 'rest', 'restful', 'graphql', 'api'
-    },
     "other_tools": {
-        'git', 'jira', 'confluence', 'linux', 'bash', 'powershell', 'vim', 'vscode', 'intellij',
+        'gi hub', 'jira', 'git', 'bash', 'powershell', 'vim', 'ci/cd', 'intellij',
         'selenium', 'cypress', 'jest', 'pytest', 'junit', 'postman'
     }
 }
@@ -97,7 +94,7 @@ SKILL_PATTERNS = set().union(*SKILL_GROUPS.values())
 # Job role categories - map role keywords to standardized category names
 # Format: 'category_name': {'keywords', 'to', 'match'}
 JOB_ROLE_CATEGORIES: Dict[str, set] = {
-    'Engineering': {'engineer', 'developer', 'devops', 'infrastructure', 'platform'},
+    'Engineering': {'engineer', 'engineering', 'developer', 'devops', 'infrastructure', 'platform'},
     'Analyst': {'analyst', 'analytics', 'business intelligence', 'bi', 'data analyst'},
     'Scientist': {'scientist', 'research', 'machine learning', 'ml engineer'},
     'Architect': {'architect', 'architecture'},
@@ -119,32 +116,11 @@ SKILL_ALIASES = {
     # Kubernetes variations
     'k8s': 'kubernetes',
     'k8': 'kubernetes',
-    
-    # Machine Learning variations
-    'ml': 'machine learning',
-    'machinelearning': 'machine learning',
-    
-    # Artificial Intelligence variations
-    'artificial intelligence': 'ai',
-    'a.i.': 'ai',
-    
-    # .NET variations
-    'dotnet': '.net',
-    'dot net': '.net',
-    '.net core': '.net',
-    'asp.net': '.net',
-    
-    # Node.js variations
-    'nodejs': 'node.js',
-    'node js': 'node.js',
+
     
     # JavaScript variations
     'js': 'javascript',
     'java script': 'javascript',
-    
-    # TypeScript variations
-    'ts': 'typescript',
-    'type script': 'typescript',
     
     # CI/CD variations
     'ci cd': 'ci/cd',
@@ -206,7 +182,7 @@ def load_config() -> Dict[str, Any]:
 
     # Title filters (include/exclude, comma-separated; applied to jobTitle)
     include_str = os.getenv("JOB_TITLE_INCLUDE", "data,bi,analyst,fabric")
-    exclude_str = os.getenv("JOB_TITLE_EXCLUDE", "trainee")
+    exclude_str = os.getenv("JOB_TITLE_EXCLUDE", "trainee,intern,apprentice,asbestos,cabling,data protection,desktop support,data administrator,it support,laboratory analyst,lab analyst,lab technician,project manager,qc,qa,recruitment,test analyst")
     cfg["JOB_TITLE_INCLUDE"] = [s.strip().lower() for s in include_str.split(",") if s.strip()]
     cfg["JOB_TITLE_EXCLUDE"] = [s.strip().lower() for s in exclude_str.split(",") if s.strip()]
 
