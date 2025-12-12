@@ -4,10 +4,7 @@
 
 ```
 jobs-pipeline/
-├── README.md                        ← Start here: Architecture, setup, features
-├── CHANGES.md                       ← Recent improvements & data quality work
-├── DUPLICATE_PREVENTION.md          ← Data quality safeguards & troubleshooting
-├── PROJECT_STRUCTURE.md             ← This file
+
 │
 ├── run_pipeline.py                  ← Local test runner (main entry point for development)
 ├── function_app.py                  ← Azure Functions entry point (deployment)
@@ -28,8 +25,12 @@ jobs-pipeline/
 │   └── ...                          └─ Other dimension tables (location, employer, etc.)
 │
 ├── docs/                            ← Infrastructure & architecture docs
-├── powerbi/                         ← Power BI/Fabric report templates
-├── infrastructure/                  ← Infrastructure-as-code (Terraform, etc.)
+│   ├── README.md                        ← Start here: Architecture, setup, features
+│   ├── recent_improvements.md           ← Recent improvements & data quality work
+│   ├── duplication_prevention.md        ← Data quality safeguards & troubleshooting
+│   ├── project_structure.md             ← This file
+├── powerbi/                         ← Power BI models
+│   ├── jobs.pbix                        ← PBIX file
 │
 ├── .gitignore                       ← Excludes secrets, local files, logs
 ├── host.json                        ← Azure Functions config
@@ -51,9 +52,9 @@ jobs-pipeline/
 | File | Purpose |
 |------|---------|
 | `README.md` | Project overview, features, architecture, setup |
-| `CHANGES.md` | Recent improvements & what was done |
-| `DUPLICATE_PREVENTION.md` | Data quality strategies & troubleshooting |
-| `PROJECT_STRUCTURE.md` | This file—explains the repo layout |
+| `recent_changes.md` | Recent improvements & what was done |
+| `duplication_prevention.md` | Data quality strategies & troubleshooting |
+| `project structure.md` | This file—explains the repo layout |
 
 ### Configuration & Dependencies
 
