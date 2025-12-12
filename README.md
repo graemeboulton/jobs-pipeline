@@ -1,7 +1,7 @@
 
 # Reed Job Pipeline
 
-An end-to-end ETL project that ingests job postings from the Reed.co.uk API, transforms and enriches them with Python, loads into PostgreSQL with dimensional modeling, and surfaces insights via Power BI/Fabric.
+An end-to-end ETL project that ingests job postings from the Reed.co.uk API, transforms and enriches them with Python, loads into PostgreSQL with dimensional modeling, and surfaces insights via Power BI.
 
 ## Project Overview
 
