@@ -219,7 +219,7 @@ python3 cleanup_duplicates.py
 python3 cleanup_duplicates.py --cleanup
 ```
 
-See [`DUPLICATE_PREVENTION.md`](./docs/duplicate_prevention.md) for detailed information about:
+See [`DUPLICATE_PREVENTION.md`](./docs/duplication_prevention.md) for detailed information about:
 - Duplicate prevention architecture
 - Root cause analysis of historical issues
 - Safeguards and monitoring
